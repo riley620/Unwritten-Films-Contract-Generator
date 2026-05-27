@@ -980,236 +980,323 @@ function buildSummary() {
 
 // ── PURE JS DOCX GENERATOR (no external libs) ─────────────────────────────
 
-function u16le(n){return[n&0xFF,(n>>8)&0xFF]}
-function u32le(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF]}
-
-function crc32(data){
-  const t=[];
-  for(let i=0;i<256;i++){let n=i;for(let j=0;j<8;j++)n=n&1?0xEDB88320^(n>>>1):n>>>1;t[i]=n;}
-  let c=0xFFFFFFFF;
-  for(let i=0;i<data.length;i++)c=t[(c^data[i])&0xFF]^(c>>>8);
-  return(c^0xFFFFFFFF)>>>0;
-}
-
-function strToU8(str){
-  const e=new TextEncoder();
-  return e.encode(str);
-}
-
-function buildZip(files){
-  const parts=[];
-  const centralDir=[];
-  let offset=0;
-  for(const f of files){
-    const name=strToU8(f.name);
-    const data=f.data;
-    const crc=crc32(data);
-    const local=new Uint8Array([
-      0x50,0x4B,0x03,0x04,20,0,0,0,0,0,0,0,0,0,
-      ...u32le(crc),...u32le(data.length),...u32le(data.length),
-      ...u16le(name.length),0,0,...name,...data
-    ]);
-    centralDir.push({name,data,crc,size:data.length,offset});
-    parts.push(local);
-    offset+=local.length;
+function crc32(buf) {
+  const table = [];
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    table[i] = c;
   }
-  const cdStart=offset;
-  const cdParts=centralDir.map(e=>new Uint8Array([
-    0x50,0x4B,0x01,0x02,20,0,20,0,0,0,0,0,0,0,0,0,
-    ...u32le(e.crc),...u32le(e.size),...u32le(e.size),
-    ...u16le(e.name.length),0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    ...u32le(e.offset),...e.name
-  ]));
-  const cdSize=cdParts.reduce((s,p)=>s+p.length,0);
-  const eocd=new Uint8Array([
-    0x50,0x4B,0x05,0x06,0,0,0,0,
-    ...u16le(centralDir.length),...u16le(centralDir.length),
-    ...u32le(cdSize),...u32le(cdStart),0,0
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function u16(n) { return [n & 0xFF, (n >> 8) & 0xFF]; }
+function u32(n) { n = n >>> 0; return [n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]; }
+
+function strBytes(s) { return new TextEncoder().encode(s); }
+
+function buildZip(files) {
+  const enc = (s) => typeof s === 'string' ? strBytes(s) : s;
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  const now = new Date();
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+
+  for (const f of files) {
+    const name = strBytes(f.name);
+    const data = enc(f.data);
+    const crc = crc32(data);
+    const local = new Uint8Array([
+      0x50,0x4B,0x03,0x04,        // local file header sig
+      ...u16(20),                  // version needed
+      ...u16(0),                   // flags
+      ...u16(0),                   // compression: stored
+      ...u16(dosTime),
+      ...u16(dosDate),
+      ...u32(crc),
+      ...u32(data.length),         // compressed size
+      ...u32(data.length),         // uncompressed size
+      ...u16(name.length),
+      ...u16(0),                   // extra field len
+      ...name,
+      ...data,
+    ]);
+    const central = new Uint8Array([
+      0x50,0x4B,0x01,0x02,        // central dir sig
+      ...u16(20),                  // version made by
+      ...u16(20),                  // version needed
+      ...u16(0),                   // flags
+      ...u16(0),                   // compression
+      ...u16(dosTime),
+      ...u16(dosDate),
+      ...u32(crc),
+      ...u32(data.length),
+      ...u32(data.length),
+      ...u16(name.length),
+      ...u16(0),                   // extra len
+      ...u16(0),                   // comment len
+      ...u16(0),                   // disk start
+      ...u16(0),                   // internal attrs
+      ...u32(0),                   // external attrs
+      ...u32(offset),
+      ...name,
+    ]);
+    locals.push(local);
+    centrals.push(central);
+    offset += local.length;
+  }
+
+  const cdOffset = offset;
+  const cdTotal = centrals.reduce((s, c) => s + c.length, 0);
+  const eocd = new Uint8Array([
+    0x50,0x4B,0x05,0x06,
+    ...u16(0), ...u16(0),
+    ...u16(files.length), ...u16(files.length),
+    ...u32(cdTotal),
+    ...u32(cdOffset),
+    ...u16(0),
   ]);
-  const allParts=[...parts,...cdParts,eocd];
-  const total=allParts.reduce((s,p)=>s+p.length,0);
-  const out=new Uint8Array(total);
-  let pos=0;
-  for(const p of allParts){out.set(p,pos);pos+=p.length;}
+
+  const all = [...locals, ...centrals, eocd];
+  const total = all.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const a of all) { out.set(a, pos); pos += a.length; }
   return out;
 }
 
-function xe(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function xe(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 
-function docRun(text,opts){
-  let r='<w:r><w:rPr>';
-  if(opts.bold)r+='<w:b/>';
-  if(opts.italic)r+='<w:i/>';
-  if(opts.size)r+=`<w:sz w:val="${opts.size}"/><w:szCs w:val="${opts.size}"/>`;
-  if(opts.color)r+=`<w:color w:val="${opts.color}"/>`;
-  if(opts.font)r+=`<w:rFonts w:ascii="${opts.font}" w:hAnsi="${opts.font}"/>`;
-  r+=`</w:rPr><w:t xml:space="preserve">${xe(text)}</w:t></w:r>`;
+function docRun(text, opts) {
+  opts = opts || {};
+  let r = '<w:r><w:rPr>';
+  if (opts.bold)   r += '<w:b/>';
+  if (opts.italic) r += '<w:i/>';
+  if (opts.size)   r += `<w:sz w:val="${opts.size}"/><w:szCs w:val="${opts.size}"/>`;
+  if (opts.color)  r += `<w:color w:val="${opts.color}"/>`;
+  if (opts.font)   r += `<w:rFonts w:ascii="${opts.font}" w:hAnsi="${opts.font}"/>`;
+  r += `</w:rPr><w:t xml:space="preserve">${xe(text)}</w:t></w:r>`;
   return r;
 }
 
-function docPara(runs,opts){
-  let ppr='<w:pPr>';
-  if(opts&&opts.center)ppr+='<w:jc w:val="center"/>';
-  let sp='';
-  if(opts&&opts.before&&opts.after)sp=`<w:spacing w:before="${opts.before}" w:after="${opts.after}"/>`;
-  else if(opts&&opts.before)sp=`<w:spacing w:before="${opts.before}"/>`;
-  else if(opts&&opts.after)sp=`<w:spacing w:after="${opts.after}"/>`;
-  ppr+=sp;
-  if(opts&&opts.border)ppr+='<w:pBdr><w:bottom w:val="single" w:sz="12" w:space="1" w:color="CEA063"/></w:pBdr>';
-  if(opts&&opts.bullet)ppr+='<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>';
-  ppr+='</w:pPr>';
+function docPara(runs, opts) {
+  opts = opts || {};
+  let ppr = '<w:pPr>';
+  if (opts.center) ppr += '<w:jc w:val="center"/>';
+  if (opts.before || opts.after) {
+    ppr += `<w:spacing${opts.before?' w:before="'+opts.before+'"':''}${opts.after?' w:after="'+opts.after+'"':''}/>`;
+  }
+  if (opts.border) ppr += '<w:pBdr><w:bottom w:val="single" w:sz="12" w:space="1" w:color="CEA063"/></w:pBdr>';
+  if (opts.bullet) ppr += '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>';
+  ppr += '</w:pPr>';
   return `<w:p>${ppr}${runs}</w:p>`;
 }
 
-function makeDocx(d){
-  const GOLD='CEA063',BLK='1A1A1A',MID='595959',DRK='2C2C2C',GL='F5E6D0';
-  const totalAmt=d.feeRows.reduce((s,r)=>{const n=parseFloat(r.amt.replace(/[^0-9.]/g,''));return s+(isNaN(n)?0:n);},0);
-  const fmt=v=>{const n=parseFloat(String(v).replace(/[^0-9.]/g,''));return isNaN(n)?v||'--':'$'+n.toLocaleString('en-AU',{minimumFractionDigits:2});};
+function makeDocx(d) {
+  const GOLD='CEA063', BLK='1A1A1A', MID='595959', DRK='2C2C2C', GL='F5E6D0';
 
-  const H1=t=>docPara(docRun(t,{bold:true,size:28,color:BLK,font:'Arial'}),{before:360,after:120,border:true});
-  const H2=t=>docPara(docRun(t,{bold:true,size:24,color:DRK,font:'Arial'}),{before:200,after:80});
-  const P=t=>docPara(docRun(t,{size:22,color:MID,font:'Arial'}),{before:60,after:60});
-  const LI=t=>docPara(docRun(t,{size:22,color:MID,font:'Arial'}),{bullet:true,before:40,after:40});
-  const SP=()=>docPara('',{before:160});
+  const totalAmt = d.feeRows.reduce((s,r) => {
+    const n = parseFloat(r.amt.replace(/[^0-9.]/g,''));
+    return s + (isNaN(n) ? 0 : n);
+  }, 0);
+  const fmt = v => {
+    const n = parseFloat(String(v).replace(/[^0-9.]/g,''));
+    return isNaN(n) ? (v||'--') : '$'+n.toLocaleString('en-AU',{minimumFractionDigits:2});
+  };
 
-  const bdr='<w:tcBorders><w:top w:val="single" w:sz="2" w:color="D4B896"/><w:left w:val="single" w:sz="2" w:color="D4B896"/><w:bottom w:val="single" w:sz="2" w:color="D4B896"/><w:right w:val="single" w:sz="2" w:color="D4B896"/></w:tcBorders>';
-  const mar='<w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="160" w:type="dxa"/></w:tcMar>';
-  const TC=(t,w,sh,bold,col)=>`<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${sh}"/>${bdr}${mar}</w:tcPr><w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:col||MID,bold:!!bold})}</w:p></w:tc>`;
+  const H1 = t => docPara(docRun(t,{bold:true,size:28,color:BLK,font:'Arial'}),{before:360,after:120,border:true});
+  const H2 = t => docPara(docRun(t,{bold:true,size:24,color:DRK,font:'Arial'}),{before:200,after:80});
+  const P  = t => docPara(docRun(t,{size:22,color:MID,font:'Arial'}),{before:60,after:60});
+  const LI = t => docPara(docRun(t,{size:22,color:MID,font:'Arial'}),{bullet:true,before:40,after:40});
+  const SP = () => docPara('',{before:160});
 
-  const infoTbl=(rows,g1,g2)=>`<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="${g1}"/><w:gridCol w:w="${g2}"/></w:tblGrid>${rows.map(([a,b],i)=>`<w:tr>${TC(a,g1,i%2===0?GL:'EDD9B8',true,DRK)}${TC(b||'--',g2,i%2===0?'FDFAF6':'FAF5EE',false,MID)}</w:tr>`).join('')}</w:tbl>`;
+  const bdr = '<w:tcBorders><w:top w:val="single" w:sz="2" w:color="D4B896"/><w:left w:val="single" w:sz="2" w:color="D4B896"/><w:bottom w:val="single" w:sz="2" w:color="D4B896"/><w:right w:val="single" w:sz="2" w:color="D4B896"/></w:tcBorders>';
+  const mar = '<w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="160" w:type="dxa"/></w:tcMar>';
 
-  const feeTbl=()=>{
-    const hTC=(t,w)=>`<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${BLK}"/>${bdr}${mar}</w:tcPr><w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:GOLD,bold:true})}</w:p></w:tc>`;
-    const tTC=(t,w)=>`<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${GL}"/>${bdr}${mar}</w:tcPr><w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:DRK,bold:true})}</w:p></w:tc>`;
-    let rows=`<w:tr><w:trPr><w:tblHeader/></w:trPr>${hTC('Description',4680)}${hTC('Amount (AUD)',2340)}${hTC('GST Incl.',2340)}</w:tr>`;
-    d.feeRows.forEach((r,i)=>{const sh=i%2===0?'FDFAF6':'FAF5EE';rows+=`<w:tr>${TC(r.desc||'--',4680,sh)}${TC(fmt(r.amt),2340,sh)}${TC('Yes',2340,sh)}</w:tr>`;});
-    const tot=totalAmt>0?'$'+totalAmt.toLocaleString('en-AU',{minimumFractionDigits:2}):'TBC';
-    rows+=`<w:tr>${tTC('TOTAL',4680)}${tTC(tot,2340)}${tTC('',2340)}</w:tr>`;
+  const TC = (t,w,sh,bold,col) =>
+    `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${sh}"/>${bdr}${mar}</w:tcPr>` +
+    `<w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:col||MID,bold:!!bold})}</w:p></w:tc>`;
+
+  const infoTbl = (rows, g1, g2) =>
+    `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblBorders>${bdr.slice(12,-13)}</w:tblBorders></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="${g1}"/><w:gridCol w:w="${g2}"/></w:tblGrid>` +
+    rows.map(([a,b],i) =>
+      `<w:tr>${TC(a,g1,i%2===0?GL:'EDD9B8',true,DRK)}${TC(b||'--',g2,i%2===0?'FDFAF6':'FAF5EE',false,MID)}</w:tr>`
+    ).join('') + `</w:tbl>`;
+
+  const feeTbl = () => {
+    const hTC = (t,w) =>
+      `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${BLK}"/>${bdr}${mar}</w:tcPr>` +
+      `<w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:GOLD,bold:true})}</w:p></w:tc>`;
+    const tTC = (t,w) =>
+      `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${GL}"/>${bdr}${mar}</w:tcPr>` +
+      `<w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:DRK,bold:true})}</w:p></w:tc>`;
+    let rows = `<w:tr><w:trPr><w:tblHeader/></w:trPr>${hTC('Description',4680)}${hTC('Amount (AUD)',2340)}${hTC('GST Incl.',2340)}</w:tr>`;
+    d.feeRows.forEach((r,i) => {
+      const sh = i%2===0?'FDFAF6':'FAF5EE';
+      rows += `<w:tr>${TC(r.desc||'--',4680,sh)}${TC(fmt(r.amt),2340,sh)}${TC('Yes',2340,sh)}</w:tr>`;
+    });
+    const tot = totalAmt>0 ? '$'+totalAmt.toLocaleString('en-AU',{minimumFractionDigits:2}) : 'TBC';
+    rows += `<w:tr>${tTC('TOTAL',4680)}${tTC(tot,2340)}${tTC('',2340)}</w:tr>`;
     return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid>${rows}</w:tbl>`;
   };
 
-  const sigTbl=(l1,l2)=>{
-    const nbdr='<w:tcBorders><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/></w:tcBorders>';
-    const sigCell=(lbl,w)=>{
-      const lines=['Signature: ___________________________','Name: ________________________________','Title: _______________________________','Date: ________________________________'];
-      const content=`<w:p><w:pPr><w:spacing w:before="320"/></w:pPr></w:p>`
-        +lines.map(t=>`<w:p><w:pPr><w:spacing w:before="100"/></w:pPr>${docRun(t,{size:22,font:'Arial',color:MID})}</w:p>`).join('')
-        +`<w:p><w:pPr><w:spacing w:before="120"/></w:pPr>${docRun(lbl,{size:20,font:'Arial',color:GOLD,bold:true})}</w:p>`;
+  const sigTbl = (l1, l2) => {
+    const nbdr = '<w:tcBorders><w:top w:val="none" w:sz="0" w:color="auto"/><w:left w:val="none" w:sz="0" w:color="auto"/><w:bottom w:val="none" w:sz="0" w:color="auto"/><w:right w:val="none" w:sz="0" w:color="auto"/></w:tcBorders>';
+    const sigCell = (lbl, w) => {
+      const lines = ['Signature: ___________________________','Name: ________________________________','Title: _______________________________','Date: ________________________________'];
+      const content =
+        `<w:p><w:pPr><w:spacing w:before="320"/></w:pPr></w:p>` +
+        lines.map(t => `<w:p><w:pPr><w:spacing w:before="100"/></w:pPr>${docRun(t,{size:22,font:'Arial',color:MID})}</w:p>`).join('') +
+        `<w:p><w:pPr><w:spacing w:before="120"/></w:pPr>${docRun(lbl,{size:20,font:'Arial',color:GOLD,bold:true})}</w:p>`;
       return `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="FDFAF6"/>${bdr}<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:bottom w:w="160" w:type="dxa"/><w:right w:w="160" w:type="dxa"/></w:tcMar></w:tcPr>${content}</w:tc>`;
     };
-    const spacer=`<w:tc><w:tcPr><w:tcW w:w="720" w:type="dxa"/>${nbdr}</w:tcPr><w:p></w:p></w:tc>`;
+    const spacer = `<w:tc><w:tcPr><w:tcW w:w="720" w:type="dxa"/>${nbdr}</w:tcPr><w:p></w:p></w:tc>`;
     return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/><w:gridCol w:w="720"/><w:gridCol w:w="4320"/></w:tblGrid><w:tr>${sigCell(l1,4320)}${spacer}${sigCell(l2,4320)}</w:tr></w:tbl>`;
   };
 
-  let cl='';
+  let cl = '';
   if(d.clauses['ip-ownership']){cl+=H2('Intellectual Property & Copyright');cl+=P('Upon receipt of full payment, the Client will own the copyright in the final delivered video(s). The Videographer retains copyright in all raw footage until full payment is received.');}
   if(d.clauses['portfolio-use']){cl+=H2('Portfolio & Promotional Use');cl+=P(`${d.providerName} may use excerpts or still frames from the final delivered video(s) for portfolio and promotional purposes, unless the Client objects in writing within 14 days of delivery.`);}
   if(d.clauses['confidentiality']){cl+=H2('Confidentiality');cl+=P('Both parties agree to keep confidential any proprietary or sensitive information shared during this engagement and not to disclose it to third parties without prior written consent, except as required by law.');}
-  if(d.clauses['liability']){cl+=H2('Liability & Insurance');cl+=LI(`${d.providerName} holds public liability insurance to the value of ${d.liabilityAmt}.`);cl+=LI('The Videographer\'s liability is limited to the total fees paid under this Agreement.');cl+=LI('The Client is responsible for ensuring a safe working environment at all filming locations.');}
-  if(d.clauses['privacy']){cl+=H2('Privacy');cl+=P(`All personal information is handled in accordance with the Privacy Act 1988 (Cth). Raw footage will be securely deleted within ${d.deletionDays} of final delivery.`);}
-  if(d.clauses['child-safety']){cl+=H2('Child Safety');cl+=LI(`${d.providerName} holds a current Working with Children Check (Blue Card). Blue Card No: ${d.blueCard||'[INSERT]'}.`);cl+=LI('A staff member will be present at all times during filming involving minors.');}
-  if(d.clauses['consent-school']){cl+=H2('Student Consent (Managed by School)');cl+=P('The School is solely responsible for obtaining and managing all parental/guardian consent forms prior to filming, in compliance with the Education (General Provisions) Act 2006 (Qld).');}
+  if(d.clauses['liability']){cl+=H2('Liability & Insurance');cl+=LI(`${d.providerName} holds public liability insurance to the value of ${d.liabilityAmt}. Certificate of Currency available on request.`);cl+=LI("The Videographer's liability is limited to the total fees paid under this Agreement.");cl+=LI('The Client is responsible for ensuring a safe working environment at all filming locations.');}
+  if(d.clauses['privacy']){cl+=H2('Privacy');cl+=P(`All personal information is handled in accordance with the Privacy Act 1988 (Cth). Raw footage will be securely deleted within ${d.deletionDays} of final delivery unless otherwise agreed in writing.`);}
+  if(d.clauses['child-safety']){cl+=H2('Child Safety');cl+=LI(`${d.providerName} holds a current Working with Children Check (Blue Card) under the Working with Children (Risk Management and Screening) Act 2000 (Qld). Blue Card No: ${d.blueCard||'[INSERT]'}.`);cl+=LI('A staff member will be present at all times during filming involving minors.');cl+=LI('The Videographer will not be left unsupervised with minors at any time.');}
+  if(d.clauses['consent-school']){cl+=H2('Student Consent (Managed by School)');cl+=P('The School is solely responsible for obtaining and managing all parental/guardian consent forms prior to filming, in compliance with the Education (General Provisions) Act 2006 (Qld). Consent records will be retained for a minimum of 7 years.');}
   if(d.clauses['backup-policy']){cl+=H2('Footage Backup Policy');cl+=P('The Videographer will maintain at least two backup copies of all raw footage until final delivery and client sign-off.');}
-  if(d.clauses['weather-clause']){cl+=H2('Weather & Force Majeure');cl+=P('If filming is postponed due to adverse weather or circumstances beyond either party\'s reasonable control, both parties will agree a new filming date at no additional charge.');}
-  if(d.clauses['site-safety']){cl+=H2('Mine Site Safety');cl+=LI('The Client must arrange all necessary site induction, access permits and PPE prior to filming.');cl+=LI('The Videographer will comply with all HSE and site access requirements.');}
-  if(d.clauses['likeness-rights']){cl+=H2('Likeness & Publicity Rights');cl+=P('The Client grants permission for the Videographer to film and reproduce the athlete\'s likeness for the purposes of this project only.');}
-  if(d.clauses['access-requirements']){cl+=H2('Event Access Requirements');cl+=LI('The Client will provide appropriate media accreditation and access to all areas required for filming.');cl+=LI('Any filming restrictions must be communicated in writing prior to the event.');}
+  if(d.clauses['weather-clause']){cl+=H2('Weather & Force Majeure');cl+=P("If filming is postponed due to adverse weather, natural disaster, government direction, or other circumstances beyond either party's reasonable control, both parties will agree a new filming date at no additional charge.");}
+  if(d.clauses['site-safety']){cl+=H2('Mine Site Safety');cl+=LI('The Client must arrange all necessary site induction, access permits and PPE requirements prior to the filming date.');cl+=LI('The Videographer will comply with all site safety, HSE, and access requirements as directed by the Client.');}
+  if(d.clauses['likeness-rights']){cl+=H2('Likeness & Publicity Rights');cl+=P("The Client grants permission for the Videographer to film and reproduce the athlete's likeness for the purposes of this project only. Any commercial use beyond the agreed deliverables requires a separate written agreement.");}
+  if(d.clauses['access-requirements']){cl+=H2('Event Access Requirements');cl+=LI('The Client will provide the Videographer with appropriate media/crew accreditation and access to all areas required for filming as agreed.');cl+=LI('Any restrictions on access or filming areas must be communicated in writing prior to the event date.');}
 
-  const partyRows=[['Client',`${d.clientName} ("the Client")`],...d.clientRows,['Service Provider',`${d.providerName} ("the Videographer")`],['ABN',d.providerABN||'--'],['Email',d.providerEmail||'--'],['Phone',d.providerPhone||'--']];
+  const partyRows = [
+    ['Client', `${d.clientName} ("the Client")`],
+    ...d.clientRows,
+    ['Service Provider', `${d.providerName} ("the Videographer")`],
+    ['ABN', d.providerABN||'--'],
+    ['Email', d.providerEmail||'--'],
+    ['Phone', d.providerPhone||'--'],
+  ];
 
-  const body=`
-    ${docPara(docRun('VIDEO PRODUCTION',{bold:true,size:48,color:BLK,font:'Arial'}),{center:true,before:200,after:0})}
-    ${docPara(docRun('SERVICES AGREEMENT',{bold:true,size:48,color:GOLD,font:'Arial'}),{center:true,after:80})}
-    ${docPara(docRun(`${d.projectType} -- ${d.clientName}`,{size:22,color:MID,font:'Arial'}),{center:true,after:400})}
-    ${H1('1. PARTIES')}
-    ${infoTbl(partyRows,2800,6560)}
-    ${SP()}
-    ${H1('2. PROJECT DETAILS')}
-    ${infoTbl([['Project Name',d.projectName||'--'],['Project Type',d.projectType],['Filming Date(s)',d.filmingDates||'--'],['Filming Location',d.filmingLocation||'--'],['Delivery Date',d.deliveryDate||'--']],2800,6560)}
-    ${SP()}
-    ${H1('3. SCOPE OF SERVICES')}
-    ${P(d.scopeDesc)}
-    ${H2('Inclusions')}
-    ${LI(`Up to ${d.revisions} round(s) of revisions based on Client feedback`)}
-    ${LI(`Raw footage: ${d.rawFootage}`)}
-    ${LI('Professional filming equipment, audio and lighting as required')}
-    ${LI('Colour grade, audio mix and titles/graphics as agreed')}
-    ${SP()}
-    ${H1('4. FEES & PAYMENT')}
-    ${feeTbl()}
-    ${SP()}
-    ${H2('Payment Terms')}
-    ${LI(`Deposit of ${d.depositPct}% due upon signing`)}
-    ${LI(`Balance due within ${d.balanceDays} days of final delivery`)}
-    ${LI(`Payment via ${d.paymentMethod}`)}
-    ${SP()}
-    ${H1('5. CANCELLATION & VARIATION')}
-    ${LI(`Cancellations with more than ${d.cancelNotice} days notice: full deposit refunded`)}
-    ${LI(`Cancellations with less than ${d.cancelNotice} days notice: deposit is ${d.cancelDeposit}`)}
-    ${LI('Material changes to scope must be agreed in writing and may attract additional fees')}
-    ${SP()}
-    ${cl?H1('6. TERMS & CONDITIONS')+cl+SP():''}
-    ${H1('7. GENERAL')}
-    ${LI('This Agreement is governed by the laws of Queensland, Australia')}
-    ${LI('Disputes will first be attempted to be resolved by negotiation in good faith')}
-    ${LI('This document constitutes the entire agreement and supersedes all prior discussions')}
-    ${LI('Amendments must be in writing and signed by both parties')}
-    ${SP()}
-    ${H1('8. SIGNATURES')}
-    ${P('By signing below, both parties agree to be bound by the terms of this Agreement.')}
-    ${docPara('',{before:160})}
-    ${sigTbl('FOR '+d.clientName.toUpperCase(), d.providerName.toUpperCase())}
-    ${SP()}
-    ${docPara(docRun('This Agreement was prepared as a general template. Both parties should seek independent legal advice before signing.',{size:18,color:'AAAAAA',font:'Arial',italic:true}),{center:true})}
-  `;
+  const body =
+    docPara(docRun('VIDEO PRODUCTION',{bold:true,size:48,color:BLK,font:'Arial'}),{center:true,before:200,after:0}) +
+    docPara(docRun('SERVICES AGREEMENT',{bold:true,size:48,color:GOLD,font:'Arial'}),{center:true,after:80}) +
+    docPara(docRun(`${d.projectType} -- ${d.clientName}`,{size:22,color:MID,font:'Arial'}),{center:true,after:400}) +
+    H1('1. PARTIES') +
+    infoTbl(partyRows, 2800, 6560) + SP() +
+    H1('2. PROJECT DETAILS') +
+    infoTbl([
+      ['Project Name', d.projectName||'--'],
+      ['Project Type', d.projectType],
+      ['Filming Date(s)', d.filmingDates||'--'],
+      ['Filming Location', d.filmingLocation||'--'],
+      ['Delivery Date', d.deliveryDate||'--'],
+    ], 2800, 6560) + SP() +
+    H1('3. SCOPE OF SERVICES') +
+    P(d.scopeDesc) + H2('Inclusions') +
+    LI(`Up to ${d.revisions} round(s) of revisions based on Client feedback`) +
+    LI(`Raw footage: ${d.rawFootage}`) +
+    LI('Professional filming equipment, audio and lighting as required') +
+    LI('Colour grade, audio mix and titles/graphics as agreed') + SP() +
+    H1('4. FEES & PAYMENT') + feeTbl() + SP() +
+    H2('Payment Terms') +
+    LI(`Deposit of ${d.depositPct}% due upon signing of this Agreement`) +
+    LI(`Balance due within ${d.balanceDays} days of final delivery`) +
+    LI(`Payment via ${d.paymentMethod}`) +
+    LI('Late payments may attract interest of 1.5% per month') + SP() +
+    H1('5. CANCELLATION & VARIATION') +
+    LI(`Cancellations with more than ${d.cancelNotice} days notice: full deposit refunded`) +
+    LI(`Cancellations with less than ${d.cancelNotice} days notice: deposit is ${d.cancelDeposit}`) +
+    LI('Material changes to scope must be agreed in writing and may attract additional fees') + SP() +
+    (cl ? H1('6. TERMS & CONDITIONS') + cl + SP() : '') +
+    H1('7. GENERAL') +
+    LI('This Agreement is governed by the laws of Queensland, Australia') +
+    LI('Disputes will first be attempted to be resolved by negotiation in good faith') +
+    LI('This document constitutes the entire agreement and supersedes all prior discussions') +
+    LI('Amendments must be in writing and signed by both parties') + SP() +
+    H1('8. SIGNATURES') +
+    P('By signing below, both parties agree to be bound by the terms of this Agreement.') +
+    docPara('', {before:160}) +
+    sigTbl('FOR ' + d.clientName.toUpperCase(), d.providerName.toUpperCase()) + SP() +
+    docPara(docRun('This Agreement was prepared as a general template. Both parties should seek independent legal advice before signing.',{size:18,color:'AAAAAA',font:'Arial',italic:true}),{center:true});
 
-  const numbering=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="&#x2022;"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
-  const document=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body></w:document>`;
-  const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`;
-  const ct=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>`;
-  const rr=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
-  const rw=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>`;
+  const numbering = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="&#x2022;"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+  const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body></w:document>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`;
+  const ct = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>`;
+  const rr = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const rw = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>`;
 
   return buildZip([
-    {name:'[Content_Types].xml',data:strToU8(ct)},
-    {name:'_rels/.rels',data:strToU8(rr)},
-    {name:'word/_rels/document.xml.rels',data:strToU8(rw)},
-    {name:'word/document.xml',data:strToU8(document)},
-    {name:'word/styles.xml',data:strToU8(styles)},
-    {name:'word/numbering.xml',data:strToU8(numbering)},
+    {name:'[Content_Types].xml', data:ct},
+    {name:'_rels/.rels', data:rr},
+    {name:'word/_rels/document.xml.rels', data:rw},
+    {name:'word/document.xml', data:document},
+    {name:'word/styles.xml', data:styles},
+    {name:'word/numbering.xml', data:numbering},
   ]);
 }
 
-function generateContract(){
-  const cfg=typeConfig[state.type];
-  const gv=id=>{const el=document.getElementById(id);return el?el.value.trim():'';};
-  const pn=gv('provider-name')||'Unwritten Films';
-  const ci={};
-  cfg.clientFields.forEach(f=>{ci[f.id]=gv(f.id)||'';});
-  const cn=ci['client-company']||ci['client-name']||((ci['client-name-1']||'')+(ci['client-name-2']?' & '+ci['client-name-2']:'')||'Client');
-  const cr=cfg.clientFields.map(f=>[f.label,ci[f.id]||'--']);
+function generateContract() {
+  const cfg = typeConfig[state.type];
+  const gv = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  const pn = gv('provider-name') || 'Unwritten Films';
+  const ci = {};
+  cfg.clientFields.forEach(f => { ci[f.id] = gv(f.id) || ''; });
+  const cn = ci['client-company'] || ci['client-name'] ||
+    ((ci['client-name-1']||'') + (ci['client-name-2'] ? ' & ' + ci['client-name-2'] : '') || 'Client');
+  const cr = cfg.clientFields.map(f => [f.label, ci[f.id]||'--']);
 
-  const d={
-    providerName:pn,providerABN:gv('provider-abn'),providerEmail:gv('provider-email'),providerPhone:gv('provider-phone'),
-    clientName:cn,clientRows:cr,projectName:gv('project-name'),projectType:cfg.label,
-    filmingDates:gv('filming-dates'),filmingLocation:gv('filming-location'),deliveryDate:gv('delivery-date'),
-    scopeDesc:gv('scope-description')||cfg.defaultScope,revisions:gv('revisions'),rawFootage:gv('raw-footage'),
-    depositPct:gv('deposit-pct'),balanceDays:gv('balance-days'),paymentMethod:gv('payment-method'),
-    cancelNotice:gv('cancel-notice'),cancelDeposit:gv('cancel-deposit'),
-    liabilityAmt:gv('liability-amount')||'$10,000,000',deletionDays:gv('deletion-days'),blueCard:gv('blue-card'),
-    feeRows:state.feeRows,clauses:state.clauses
+  const d = {
+    providerName: pn,
+    providerABN: gv('provider-abn'),
+    providerEmail: gv('provider-email'),
+    providerPhone: gv('provider-phone'),
+    clientName: cn, clientRows: cr,
+    projectName: gv('project-name'),
+    projectType: cfg.label,
+    filmingDates: gv('filming-dates'),
+    filmingLocation: gv('filming-location'),
+    deliveryDate: gv('delivery-date'),
+    scopeDesc: gv('scope-description') || cfg.defaultScope,
+    revisions: gv('revisions'),
+    rawFootage: gv('raw-footage'),
+    depositPct: gv('deposit-pct'),
+    balanceDays: gv('balance-days'),
+    paymentMethod: gv('payment-method'),
+    cancelNotice: gv('cancel-notice'),
+    cancelDeposit: gv('cancel-deposit'),
+    liabilityAmt: gv('liability-amount') || '$10,000,000',
+    deletionDays: gv('deletion-days'),
+    blueCard: gv('blue-card'),
+    feeRows: state.feeRows,
+    clauses: state.clauses,
   };
 
-  const zip=makeDocx(d);
-  let bin='';
-  for(let i=0;i<zip.length;i++)bin+=String.fromCharCode(zip[i]);
-  const b64=btoa(bin);
-  const fn=`${pn.replace(/\s+/g,'_')}_${cfg.label}_${cn.replace(/\s+/g,'_')}.docx`;
-  const a=document.createElement('a');
-  a.href='data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,'+b64;
-  a.download=fn;a.style.display='none';
-  document.body.appendChild(a);a.click();
-  setTimeout(()=>a.remove(),500);
+  const zip = makeDocx(d);
+
+  // Convert Uint8Array to base64
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < zip.length; i += chunkSize) {
+    binary += String.fromCharCode(...zip.subarray(i, i + chunkSize));
+  }
+  const b64 = btoa(binary);
+
+  const fn = `${pn.replace(/\s+/g,'_')}_${cfg.label}_${cn.replace(/\s+/g,'_')}.docx`;
+  const a = document.createElement('a');
+  a.href = 'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,' + b64;
+  a.download = fn;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 500);
 }
 
 

@@ -5,8 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Unwritten Films — Contract Builder</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Montserrat:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/docx/8.5.0/docx.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
 <style>
   :root {
     --gold: #cea063;
@@ -980,296 +978,240 @@ function buildSummary() {
   ).join('');
 }
 
-// ── GENERATE DOCX ──────────────────────────────────────────────────────────
-async function generateContract() {
-  const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-    AlignmentType, BorderStyle, WidthType, ShadingType, LevelFormat,
-    PageNumber, Footer, Header } = docx;
+// ── PURE JS DOCX GENERATOR (no external libs) ─────────────────────────────
 
-  const GOLD = "cea063", GOLD_LIGHT = "F5E6D0", BLACK = "1A1A1A",
-    DARK = "2C2C2C", MID = "595959", WHITE = "FFFFFF";
+function u16le(n){return[n&0xFF,(n>>8)&0xFF]}
+function u32le(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF]}
 
-  const cb = { style: BorderStyle.SINGLE, size: 1, color: "D4B896" };
-  const borders = { top:cb, bottom:cb, left:cb, right:cb };
-  const nob = { style: BorderStyle.NONE, size:0, color:"FFFFFF" };
-  const noborders = { top:nob, bottom:nob, left:nob, right:nob };
-
-  const h1 = (text) => new Paragraph({
-    children: [new TextRun({ text, bold:true, size:28, color:BLACK, font:"Arial" })],
-    spacing: { before:360, after:120 },
-    border: { bottom: { style:BorderStyle.SINGLE, size:8, color:GOLD, space:1 } }
-  });
-  const h2 = (text) => new Paragraph({
-    children: [new TextRun({ text, bold:true, size:24, color:DARK, font:"Arial" })],
-    spacing: { before:200, after:80 }
-  });
-  const p = (text) => new Paragraph({
-    children: [new TextRun({ text, size:22, font:"Arial", color:MID })],
-    spacing: { before:60, after:60 }
-  });
-  const li = (text) => new Paragraph({
-    numbering: { reference:"bullets", level:0 },
-    children: [new TextRun({ text, size:22, font:"Arial", color:MID })],
-    spacing: { before:40, after:40 }
-  });
-  const space = () => new Paragraph({ children:[new TextRun({text:"",size:22})], spacing:{before:160} });
-
-  // Gather values
-  const cfg = typeConfig[state.type];
-  const providerName = getVal('provider-name') || 'Unwritten Films';
-  const providerABN = getVal('provider-abn');
-  const providerEmail = getVal('provider-email');
-  const providerPhone = getVal('provider-phone');
-  const projectName = getVal('project-name');
-  const filmingLocation = getVal('filming-location');
-  const filmingDates = getVal('filming-dates');
-  const deliveryDate = getVal('delivery-date');
-  const scopeDesc = getVal('scope-description') || cfg.defaultScope;
-  const revisions = getVal('revisions');
-  const rawFootage = getVal('raw-footage');
-  const depositPct = getVal('deposit-pct');
-  const balanceDays = getVal('balance-days');
-  const paymentMethod = getVal('payment-method');
-  const cancelNotice = getVal('cancel-notice');
-  const cancelDeposit = getVal('cancel-deposit');
-  const liabilityAmt = getVal('liability-amount') || '$10,000,000';
-  const deletionDays = getVal('deletion-days');
-  const blueCard = getVal('blue-card');
-
-  // Client info
-  const clientInfo = {};
-  cfg.clientFields.forEach(f => { clientInfo[f.id] = getVal(f.id) || f.placeholder.replace('e.g. ',''); });
-
-  const clientName = clientInfo['client-company'] || clientInfo['client-name'] ||
-    ((clientInfo['client-name-1']||'') + (clientInfo['client-name-2'] ? ' & ' + clientInfo['client-name-2'] : '')) || 'Client';
-
-  // Info table helper
-  const infoTable = (rows) => new Table({
-    width: { size:9360, type:WidthType.DXA },
-    columnWidths: [2800, 6560],
-    rows: rows.map(([label, value], i) => new TableRow({ children: [
-      new TableCell({ borders, width:{size:2800,type:WidthType.DXA},
-        shading:{fill:i%2===0?GOLD_LIGHT:"EDD9B8",type:ShadingType.CLEAR},
-        margins:{top:80,bottom:80,left:160,right:160},
-        children:[new Paragraph({children:[new TextRun({text:label,size:22,font:"Arial",bold:true,color:DARK})]})]
-      }),
-      new TableCell({ borders, width:{size:6560,type:WidthType.DXA},
-        shading:{fill:i%2===0?"FDFAF6":"FAF5EE",type:ShadingType.CLEAR},
-        margins:{top:80,bottom:80,left:160,right:160},
-        children:[new Paragraph({children:[new TextRun({text:value||'—',size:22,font:"Arial",color:MID})]})]
-      })
-    ]}))
-  });
-
-  // Fee table
-  const totalAmt = state.feeRows.reduce((s,r)=>{const n=parseFloat(r.amt.replace(/[^0-9.]/g,''));return s+(isNaN(n)?0:n);},0);
-  const fmtAmt = (v) => { const n=parseFloat(v.replace(/[^0-9.]/g,'')); return isNaN(n)?v||'—':'$'+n.toLocaleString('en-AU',{minimumFractionDigits:2}); };
-
-  const hCell=(text,w)=>new TableCell({borders,width:{size:w,type:WidthType.DXA},shading:{fill:BLACK,type:ShadingType.CLEAR},margins:{top:80,bottom:80,left:160,right:160},children:[new Paragraph({children:[new TextRun({text,size:22,font:"Arial",bold:true,color:GOLD})]})]});
-  const dCell=(text,w,sh)=>new TableCell({borders,width:{size:w,type:WidthType.DXA},shading:{fill:sh,type:ShadingType.CLEAR},margins:{top:80,bottom:80,left:160,right:160},children:[new Paragraph({children:[new TextRun({text,size:22,font:"Arial",color:MID})]})]});
-  const tCell=(text,w)=>new TableCell({borders,width:{size:w,type:WidthType.DXA},shading:{fill:GOLD_LIGHT,type:ShadingType.CLEAR},margins:{top:80,bottom:80,left:160,right:160},children:[new Paragraph({children:[new TextRun({text,size:22,font:"Arial",bold:true,color:DARK})]})]});
-
-  const feeTable = new Table({
-    width:{size:9360,type:WidthType.DXA}, columnWidths:[4680,2340,2340],
-    rows:[
-      new TableRow({tableHeader:true,children:[hCell("Description",4680),hCell("Amount (AUD)",2340),hCell("GST Incl.",2340)]}),
-      ...state.feeRows.map((r,i)=>new TableRow({children:[dCell(r.desc||'—',4680,i%2===0?"FDFAF6":"FAF5EE"),dCell(fmtAmt(r.amt),2340,i%2===0?"FDFAF6":"FAF5EE"),dCell("Yes",2340,i%2===0?"FDFAF6":"FAF5EE")]})),
-      new TableRow({children:[tCell("TOTAL",4680),tCell(totalAmt>0?'$'+totalAmt.toLocaleString('en-AU',{minimumFractionDigits:2}):'TBC',2340),tCell("",2340)]})
-    ]
-  });
-
-  // Signature block
-  const sigBlock = (label) => [
-    new Paragraph({children:[new TextRun({text:"",size:22})],spacing:{before:320}}),
-    new Paragraph({children:[new TextRun({text:"Signature: ___________________________",size:22,font:"Arial",color:MID})]}),
-    new Paragraph({children:[new TextRun({text:"Name: ________________________________",size:22,font:"Arial",color:MID})],spacing:{before:100}}),
-    new Paragraph({children:[new TextRun({text:"Title: _______________________________",size:22,font:"Arial",color:MID})],spacing:{before:100}}),
-    new Paragraph({children:[new TextRun({text:"Date: ________________________________",size:22,font:"Arial",color:MID})],spacing:{before:100}}),
-    new Paragraph({children:[new TextRun({text:label,size:20,font:"Arial",bold:true,color:GOLD})],spacing:{before:120}}),
-  ];
-
-  // Active clauses → sections
-  const clauseSections = [];
-  if (state.clauses['ip-ownership']) {
-    clauseSections.push(h2("Intellectual Property & Copyright"));
-    clauseSections.push(p("Upon receipt of full payment, the Client will own the copyright in the final delivered video(s). The Videographer retains copyright in all raw footage until full payment is received."));
-    clauseSections.push(p(`${providerName} retains the right to re-edit, repurpose or otherwise use any underlying techniques, skills, and know-how developed during the project.`));
-  }
-  if (state.clauses['portfolio-use']) {
-    clauseSections.push(h2("Portfolio & Promotional Use"));
-    clauseSections.push(p(`${providerName} may use excerpts or still frames from the final delivered video(s) for portfolio and promotional purposes, unless the Client objects in writing within 14 days of delivery. Any use involving identifiable minors requires separate written consent.`));
-  }
-  if (state.clauses['confidentiality']) {
-    clauseSections.push(h2("Confidentiality"));
-    clauseSections.push(p("Both parties agree to keep confidential any proprietary or sensitive information shared during this engagement and not to disclose it to third parties without prior written consent, except as required by law."));
-  }
-  if (state.clauses['liability']) {
-    clauseSections.push(h2("Liability & Insurance"));
-    clauseSections.push(li(`${providerName} holds public liability insurance to the value of ${liabilityAmt}. Certificate of Currency available on request.`));
-    clauseSections.push(li(`The Videographer's liability is limited to the total fees paid under this Agreement.`));
-    clauseSections.push(li("The Client is responsible for ensuring a safe working environment at all filming locations."));
-  }
-  if (state.clauses['privacy']) {
-    clauseSections.push(h2("Privacy"));
-    clauseSections.push(p(`All personal information is handled in accordance with the Privacy Act 1988 (Cth). Raw footage will be securely deleted within ${deletionDays} of final delivery unless otherwise agreed in writing.`));
-  }
-  if (state.clauses['child-safety']) {
-    clauseSections.push(h2("Child Safety"));
-    clauseSections.push(li(`${providerName} holds a current Working with Children Check (Blue Card) under the Working with Children (Risk Management and Screening) Act 2000 (Qld). Blue Card No: ${blueCard || '[INSERT]'}.`));
-    clauseSections.push(li("A responsible adult/staff member will be present at all times during filming involving minors."));
-    clauseSections.push(li("The Videographer will not be left unsupervised with minors at any time."));
-  }
-  if (state.clauses['consent-school']) {
-    clauseSections.push(h2("Student Consent (Managed by School)"));
-    clauseSections.push(p("The School is solely responsible for obtaining and managing all parental/guardian consent forms prior to filming. The School warrants that all consents comply with the Education (General Provisions) Act 2006 (Qld) and will be retained for a minimum of 7 years."));
-    clauseSections.push(p("The School will notify the Videographer prior to filming of any students who do not have consent to be filmed."));
-  }
-  if (state.clauses['backup-policy']) {
-    clauseSections.push(h2("Footage Backup Policy"));
-    clauseSections.push(p("The Videographer will maintain at least two backup copies of all raw footage until final delivery and client sign-off. The Videographer is not liable for loss of footage due to circumstances beyond their reasonable control (e.g. equipment failure, natural disaster)."));
-  }
-  if (state.clauses['weather-clause']) {
-    clauseSections.push(h2("Weather & Force Majeure"));
-    clauseSections.push(p("If filming is postponed due to adverse weather, natural disaster, government direction, or other circumstances beyond either party's reasonable control, both parties will agree a new filming date at no additional charge. If rescheduling is not possible, a pro-rata refund of deposit may apply at the Videographer's discretion."));
-  }
-  if (state.clauses['site-safety']) {
-    clauseSections.push(h2("Mine Site Safety"));
-    clauseSections.push(li("The Client must arrange all necessary site induction, access permits and PPE requirements prior to the filming date."));
-    clauseSections.push(li("The Videographer will comply with all site safety, HSE, and access requirements as directed by the Client."));
-    clauseSections.push(li("The Client indemnifies the Videographer against any site-specific hazards not disclosed prior to arrival."));
-  }
-  if (state.clauses['likeness-rights']) {
-    clauseSections.push(h2("Likeness & Publicity Rights"));
-    clauseSections.push(p("The Client grants permission for the Videographer to film and reproduce the athlete's likeness for the purposes of this project. Use of the athlete's name, image, or likeness for any commercial purpose beyond the agreed deliverables requires a separate written agreement."));
-  }
-  if (state.clauses['access-requirements']) {
-    clauseSections.push(h2("Event Access Requirements"));
-    clauseSections.push(li("The Client will provide the Videographer with appropriate media/crew accreditation and access to all areas required for filming as agreed."));
-    clauseSections.push(li("Any restrictions on access, filming areas, or subject matter must be communicated in writing prior to the event date."));
-    clauseSections.push(li("The Client indemnifies the Videographer for any inability to capture specific moments due to access restrictions not disclosed in advance."));
-  }
-
-  // Client info rows
-  const clientRows = cfg.clientFields.map(f => [f.label, clientInfo[f.id] || '—']);
-
-  const doc2 = new Document({
-    numbering: { config: [{ reference:"bullets", levels:[{level:0,format:LevelFormat.BULLET,text:"\u2022",alignment:AlignmentType.LEFT,style:{paragraph:{indent:{left:720,hanging:360}}}}]}] },
-    styles: { default: { document: { run: { font:"Arial", size:22 } } } },
-    sections: [{
-      properties: { page: { size:{width:11906,height:16838}, margin:{top:1134,right:1134,bottom:1134,left:1134} } },
-      headers: { default: new Header({ children: [new Paragraph({
-        children: [
-          new TextRun({text:providerName.toUpperCase(),bold:true,size:20,font:"Arial",color:GOLD}),
-          new TextRun({text:`  |  ${cfg.label} Video Production Agreement`,size:20,font:"Arial",color:MID}),
-        ],
-        border:{bottom:{style:BorderStyle.SINGLE,size:6,color:GOLD,space:1}}
-      })]})},
-      footers: { default: new Footer({ children: [new Paragraph({
-        children:[
-          new TextRun({text:"Page ",size:18,font:"Arial",color:MID}),
-          new TextRun({children:[PageNumber.CURRENT],size:18,font:"Arial",color:MID}),
-          new TextRun({text:" of ",size:18,font:"Arial",color:MID}),
-          new TextRun({children:[PageNumber.TOTAL_PAGES],size:18,font:"Arial",color:MID}),
-          new TextRun({text:`    |    Confidential    |    ${providerName}`,size:18,font:"Arial",color:MID}),
-        ],
-        alignment:AlignmentType.CENTER,
-        border:{top:{style:BorderStyle.SINGLE,size:6,color:GOLD,space:1}}
-      })]})},
-      children: [
-        new Paragraph({children:[new TextRun({text:"VIDEO PRODUCTION",bold:true,size:48,font:"Arial",color:BLACK})],alignment:AlignmentType.CENTER,spacing:{before:200,after:0}}),
-        new Paragraph({children:[new TextRun({text:"SERVICES AGREEMENT",bold:true,size:48,font:"Arial",color:GOLD})],alignment:AlignmentType.CENTER,spacing:{before:0,after:80}}),
-        new Paragraph({children:[new TextRun({text:`${cfg.label} — ${clientName}`,size:22,font:"Arial",color:MID})],alignment:AlignmentType.CENTER,spacing:{after:400}}),
-
-        h1("1. PARTIES"),
-        infoTable([
-          ["Client", `${clientName} ("the Client")`],
-          ...clientRows,
-          ["Service Provider", `${providerName} ("the Videographer")`],
-          ["ABN", providerABN || '—'],
-          ["Provider Email", providerEmail || '—'],
-          ["Provider Phone", providerPhone || '—'],
-        ]),
-        space(),
-
-        h1("2. PROJECT DETAILS"),
-        infoTable([
-          ["Project Name", projectName || '—'],
-          ["Project Type", cfg.label],
-          ["Filming Date(s)", filmingDates || '—'],
-          ["Filming Location", filmingLocation || '—'],
-          ["Delivery Date", deliveryDate || '—'],
-        ]),
-        space(),
-
-        h1("3. SCOPE OF SERVICES"),
-        p(scopeDesc),
-        h2("Inclusions"),
-        li(`Up to ${revisions} round(s) of revisions based on Client feedback`),
-        li(`Raw footage: ${rawFootage}`),
-        li("Professional filming equipment, audio and lighting as required"),
-        li("Colour grade, audio mix and titles/graphics as agreed"),
-        space(),
-
-        h1("4. FEES & PAYMENT"),
-        feeTable,
-        space(),
-        h2("Payment Terms"),
-        li(`Deposit of ${depositPct}% due upon signing of this Agreement`),
-        li(`Balance due within ${balanceDays} days of final delivery`),
-        li(`Payment via ${paymentMethod}`),
-        li("Late payments may attract interest of 1.5% per month"),
-        space(),
-
-        h1("5. CANCELLATION & VARIATION"),
-        li(`Cancellations with more than ${cancelNotice} days notice: full deposit refunded`),
-        li(`Cancellations with less than ${cancelNotice} days notice: deposit is ${cancelDeposit}`),
-        li("Material changes to scope must be agreed in writing and may attract additional fees"),
-        space(),
-
-        ...(clauseSections.length ? [h1("6. TERMS & CONDITIONS"), ...clauseSections, space()] : []),
-
-        h1("7. GENERAL"),
-        li("This Agreement is governed by the laws of Queensland, Australia"),
-        li("Disputes will first be attempted to be resolved by negotiation in good faith"),
-        li("This document constitutes the entire agreement and supersedes all prior discussions"),
-        li("Amendments must be in writing and signed by both parties"),
-        space(),
-
-        h1("8. SIGNATURES"),
-        p("By signing below, both parties agree to be bound by the terms of this Agreement."),
-        new Paragraph({spacing:{before:160}}),
-
-        new Table({
-          width:{size:9360,type:WidthType.DXA},
-          columnWidths:[4320,720,4320],
-          rows:[new TableRow({children:[
-            new TableCell({borders,width:{size:4320,type:WidthType.DXA},shading:{fill:"FDFAF6",type:ShadingType.CLEAR},margins:{top:120,bottom:160,left:160,right:160},children:sigBlock(`FOR ${clientName.toUpperCase()}`)}),
-            new TableCell({borders:noborders,width:{size:720,type:WidthType.DXA},children:[new Paragraph({children:[new TextRun("")]})]}),
-            new TableCell({borders,width:{size:4320,type:WidthType.DXA},shading:{fill:"FDFAF6",type:ShadingType.CLEAR},margins:{top:120,bottom:160,left:160,right:160},children:sigBlock(providerName.toUpperCase())}),
-          ]})]
-        }),
-
-        new Paragraph({spacing:{before:300}}),
-        new Paragraph({children:[new TextRun({text:"This Agreement was prepared as a general template. Both parties should seek independent legal advice before signing.",size:18,font:"Arial",color:"AAAAAA",italics:true})],alignment:AlignmentType.CENTER}),
-      ]
-    }]
-  });
-
-  const filename = `${providerName.replace(/\s+/g,'_')}_${cfg.label}_Agreement_${(clientName||'Client').replace(/\s+/g,'_')}.docx`;
-  const buffer = await Packer.toBuffer(doc2);
-  const uint8 = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i]);
-  const base64 = btoa(binary);
-  const dataUri = 'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,' + base64;
-  const dlA = document.createElement('a');
-  dlA.href = dataUri;
-  dlA.download = filename;
-  dlA.style.display = 'none';
-  document.body.appendChild(dlA);
-  dlA.click();
-  setTimeout(() => dlA.remove(), 500);
+function crc32(data){
+  const t=[];
+  for(let i=0;i<256;i++){let n=i;for(let j=0;j<8;j++)n=n&1?0xEDB88320^(n>>>1):n>>>1;t[i]=n;}
+  let c=0xFFFFFFFF;
+  for(let i=0;i<data.length;i++)c=t[(c^data[i])&0xFF]^(c>>>8);
+  return(c^0xFFFFFFFF)>>>0;
 }
+
+function strToU8(str){
+  const e=new TextEncoder();
+  return e.encode(str);
+}
+
+function buildZip(files){
+  const parts=[];
+  const centralDir=[];
+  let offset=0;
+  for(const f of files){
+    const name=strToU8(f.name);
+    const data=f.data;
+    const crc=crc32(data);
+    const local=new Uint8Array([
+      0x50,0x4B,0x03,0x04,20,0,0,0,0,0,0,0,0,0,
+      ...u32le(crc),...u32le(data.length),...u32le(data.length),
+      ...u16le(name.length),0,0,...name,...data
+    ]);
+    centralDir.push({name,data,crc,size:data.length,offset});
+    parts.push(local);
+    offset+=local.length;
+  }
+  const cdStart=offset;
+  const cdParts=centralDir.map(e=>new Uint8Array([
+    0x50,0x4B,0x01,0x02,20,0,20,0,0,0,0,0,0,0,0,0,
+    ...u32le(e.crc),...u32le(e.size),...u32le(e.size),
+    ...u16le(e.name.length),0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    ...u32le(e.offset),...e.name
+  ]));
+  const cdSize=cdParts.reduce((s,p)=>s+p.length,0);
+  const eocd=new Uint8Array([
+    0x50,0x4B,0x05,0x06,0,0,0,0,
+    ...u16le(centralDir.length),...u16le(centralDir.length),
+    ...u32le(cdSize),...u32le(cdStart),0,0
+  ]);
+  const allParts=[...parts,...cdParts,eocd];
+  const total=allParts.reduce((s,p)=>s+p.length,0);
+  const out=new Uint8Array(total);
+  let pos=0;
+  for(const p of allParts){out.set(p,pos);pos+=p.length;}
+  return out;
+}
+
+function xe(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+function docRun(text,opts){
+  let r='<w:r><w:rPr>';
+  if(opts.bold)r+='<w:b/>';
+  if(opts.italic)r+='<w:i/>';
+  if(opts.size)r+=`<w:sz w:val="${opts.size}"/><w:szCs w:val="${opts.size}"/>`;
+  if(opts.color)r+=`<w:color w:val="${opts.color}"/>`;
+  if(opts.font)r+=`<w:rFonts w:ascii="${opts.font}" w:hAnsi="${opts.font}"/>`;
+  r+=`</w:rPr><w:t xml:space="preserve">${xe(text)}</w:t></w:r>`;
+  return r;
+}
+
+function docPara(runs,opts){
+  let ppr='<w:pPr>';
+  if(opts&&opts.center)ppr+='<w:jc w:val="center"/>';
+  let sp='';
+  if(opts&&opts.before&&opts.after)sp=`<w:spacing w:before="${opts.before}" w:after="${opts.after}"/>`;
+  else if(opts&&opts.before)sp=`<w:spacing w:before="${opts.before}"/>`;
+  else if(opts&&opts.after)sp=`<w:spacing w:after="${opts.after}"/>`;
+  ppr+=sp;
+  if(opts&&opts.border)ppr+='<w:pBdr><w:bottom w:val="single" w:sz="12" w:space="1" w:color="CEA063"/></w:pBdr>';
+  if(opts&&opts.bullet)ppr+='<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>';
+  ppr+='</w:pPr>';
+  return `<w:p>${ppr}${runs}</w:p>`;
+}
+
+function makeDocx(d){
+  const GOLD='CEA063',BLK='1A1A1A',MID='595959',DRK='2C2C2C',GL='F5E6D0';
+  const totalAmt=d.feeRows.reduce((s,r)=>{const n=parseFloat(r.amt.replace(/[^0-9.]/g,''));return s+(isNaN(n)?0:n);},0);
+  const fmt=v=>{const n=parseFloat(String(v).replace(/[^0-9.]/g,''));return isNaN(n)?v||'--':'$'+n.toLocaleString('en-AU',{minimumFractionDigits:2});};
+
+  const H1=t=>docPara(docRun(t,{bold:true,size:28,color:BLK,font:'Arial'}),{before:360,after:120,border:true});
+  const H2=t=>docPara(docRun(t,{bold:true,size:24,color:DRK,font:'Arial'}),{before:200,after:80});
+  const P=t=>docPara(docRun(t,{size:22,color:MID,font:'Arial'}),{before:60,after:60});
+  const LI=t=>docPara(docRun(t,{size:22,color:MID,font:'Arial'}),{bullet:true,before:40,after:40});
+  const SP=()=>docPara('',{before:160});
+
+  const bdr='<w:tcBorders><w:top w:val="single" w:sz="2" w:color="D4B896"/><w:left w:val="single" w:sz="2" w:color="D4B896"/><w:bottom w:val="single" w:sz="2" w:color="D4B896"/><w:right w:val="single" w:sz="2" w:color="D4B896"/></w:tcBorders>';
+  const mar='<w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="160" w:type="dxa"/></w:tcMar>';
+  const TC=(t,w,sh,bold,col)=>`<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${sh}"/>${bdr}${mar}</w:tcPr><w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:col||MID,bold:!!bold})}</w:p></w:tc>`;
+
+  const infoTbl=(rows,g1,g2)=>`<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="${g1}"/><w:gridCol w:w="${g2}"/></w:tblGrid>${rows.map(([a,b],i)=>`<w:tr>${TC(a,g1,i%2===0?GL:'EDD9B8',true,DRK)}${TC(b||'--',g2,i%2===0?'FDFAF6':'FAF5EE',false,MID)}</w:tr>`).join('')}</w:tbl>`;
+
+  const feeTbl=()=>{
+    const hTC=(t,w)=>`<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${BLK}"/>${bdr}${mar}</w:tcPr><w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:GOLD,bold:true})}</w:p></w:tc>`;
+    const tTC=(t,w)=>`<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="${GL}"/>${bdr}${mar}</w:tcPr><w:p><w:pPr></w:pPr>${docRun(t,{size:22,font:'Arial',color:DRK,bold:true})}</w:p></w:tc>`;
+    let rows=`<w:tr><w:trPr><w:tblHeader/></w:trPr>${hTC('Description',4680)}${hTC('Amount (AUD)',2340)}${hTC('GST Incl.',2340)}</w:tr>`;
+    d.feeRows.forEach((r,i)=>{const sh=i%2===0?'FDFAF6':'FAF5EE';rows+=`<w:tr>${TC(r.desc||'--',4680,sh)}${TC(fmt(r.amt),2340,sh)}${TC('Yes',2340,sh)}</w:tr>`;});
+    const tot=totalAmt>0?'$'+totalAmt.toLocaleString('en-AU',{minimumFractionDigits:2}):'TBC';
+    rows+=`<w:tr>${tTC('TOTAL',4680)}${tTC(tot,2340)}${tTC('',2340)}</w:tr>`;
+    return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid>${rows}</w:tbl>`;
+  };
+
+  const sigTbl=(l1,l2)=>{
+    const nbdr='<w:tcBorders><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/></w:tcBorders>';
+    const sigCell=(lbl,w)=>{
+      const lines=['Signature: ___________________________','Name: ________________________________','Title: _______________________________','Date: ________________________________'];
+      const content=`<w:p><w:pPr><w:spacing w:before="320"/></w:pPr></w:p>`
+        +lines.map(t=>`<w:p><w:pPr><w:spacing w:before="100"/></w:pPr>${docRun(t,{size:22,font:'Arial',color:MID})}</w:p>`).join('')
+        +`<w:p><w:pPr><w:spacing w:before="120"/></w:pPr>${docRun(lbl,{size:20,font:'Arial',color:GOLD,bold:true})}</w:p>`;
+      return `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="FDFAF6"/>${bdr}<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:bottom w:w="160" w:type="dxa"/><w:right w:w="160" w:type="dxa"/></w:tcMar></w:tcPr>${content}</w:tc>`;
+    };
+    const spacer=`<w:tc><w:tcPr><w:tcW w:w="720" w:type="dxa"/>${nbdr}</w:tcPr><w:p></w:p></w:tc>`;
+    return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/><w:gridCol w:w="720"/><w:gridCol w:w="4320"/></w:tblGrid><w:tr>${sigCell(l1,4320)}${spacer}${sigCell(l2,4320)}</w:tr></w:tbl>`;
+  };
+
+  let cl='';
+  if(d.clauses['ip-ownership']){cl+=H2('Intellectual Property & Copyright');cl+=P('Upon receipt of full payment, the Client will own the copyright in the final delivered video(s). The Videographer retains copyright in all raw footage until full payment is received.');}
+  if(d.clauses['portfolio-use']){cl+=H2('Portfolio & Promotional Use');cl+=P(`${d.providerName} may use excerpts or still frames from the final delivered video(s) for portfolio and promotional purposes, unless the Client objects in writing within 14 days of delivery.`);}
+  if(d.clauses['confidentiality']){cl+=H2('Confidentiality');cl+=P('Both parties agree to keep confidential any proprietary or sensitive information shared during this engagement and not to disclose it to third parties without prior written consent, except as required by law.');}
+  if(d.clauses['liability']){cl+=H2('Liability & Insurance');cl+=LI(`${d.providerName} holds public liability insurance to the value of ${d.liabilityAmt}.`);cl+=LI('The Videographer\'s liability is limited to the total fees paid under this Agreement.');cl+=LI('The Client is responsible for ensuring a safe working environment at all filming locations.');}
+  if(d.clauses['privacy']){cl+=H2('Privacy');cl+=P(`All personal information is handled in accordance with the Privacy Act 1988 (Cth). Raw footage will be securely deleted within ${d.deletionDays} of final delivery.`);}
+  if(d.clauses['child-safety']){cl+=H2('Child Safety');cl+=LI(`${d.providerName} holds a current Working with Children Check (Blue Card). Blue Card No: ${d.blueCard||'[INSERT]'}.`);cl+=LI('A staff member will be present at all times during filming involving minors.');}
+  if(d.clauses['consent-school']){cl+=H2('Student Consent (Managed by School)');cl+=P('The School is solely responsible for obtaining and managing all parental/guardian consent forms prior to filming, in compliance with the Education (General Provisions) Act 2006 (Qld).');}
+  if(d.clauses['backup-policy']){cl+=H2('Footage Backup Policy');cl+=P('The Videographer will maintain at least two backup copies of all raw footage until final delivery and client sign-off.');}
+  if(d.clauses['weather-clause']){cl+=H2('Weather & Force Majeure');cl+=P('If filming is postponed due to adverse weather or circumstances beyond either party\'s reasonable control, both parties will agree a new filming date at no additional charge.');}
+  if(d.clauses['site-safety']){cl+=H2('Mine Site Safety');cl+=LI('The Client must arrange all necessary site induction, access permits and PPE prior to filming.');cl+=LI('The Videographer will comply with all HSE and site access requirements.');}
+  if(d.clauses['likeness-rights']){cl+=H2('Likeness & Publicity Rights');cl+=P('The Client grants permission for the Videographer to film and reproduce the athlete\'s likeness for the purposes of this project only.');}
+  if(d.clauses['access-requirements']){cl+=H2('Event Access Requirements');cl+=LI('The Client will provide appropriate media accreditation and access to all areas required for filming.');cl+=LI('Any filming restrictions must be communicated in writing prior to the event.');}
+
+  const partyRows=[['Client',`${d.clientName} ("the Client")`],...d.clientRows,['Service Provider',`${d.providerName} ("the Videographer")`],['ABN',d.providerABN||'--'],['Email',d.providerEmail||'--'],['Phone',d.providerPhone||'--']];
+
+  const body=`
+    ${docPara(docRun('VIDEO PRODUCTION',{bold:true,size:48,color:BLK,font:'Arial'}),{center:true,before:200,after:0})}
+    ${docPara(docRun('SERVICES AGREEMENT',{bold:true,size:48,color:GOLD,font:'Arial'}),{center:true,after:80})}
+    ${docPara(docRun(`${d.projectType} -- ${d.clientName}`,{size:22,color:MID,font:'Arial'}),{center:true,after:400})}
+    ${H1('1. PARTIES')}
+    ${infoTbl(partyRows,2800,6560)}
+    ${SP()}
+    ${H1('2. PROJECT DETAILS')}
+    ${infoTbl([['Project Name',d.projectName||'--'],['Project Type',d.projectType],['Filming Date(s)',d.filmingDates||'--'],['Filming Location',d.filmingLocation||'--'],['Delivery Date',d.deliveryDate||'--']],2800,6560)}
+    ${SP()}
+    ${H1('3. SCOPE OF SERVICES')}
+    ${P(d.scopeDesc)}
+    ${H2('Inclusions')}
+    ${LI(`Up to ${d.revisions} round(s) of revisions based on Client feedback`)}
+    ${LI(`Raw footage: ${d.rawFootage}`)}
+    ${LI('Professional filming equipment, audio and lighting as required')}
+    ${LI('Colour grade, audio mix and titles/graphics as agreed')}
+    ${SP()}
+    ${H1('4. FEES & PAYMENT')}
+    ${feeTbl()}
+    ${SP()}
+    ${H2('Payment Terms')}
+    ${LI(`Deposit of ${d.depositPct}% due upon signing`)}
+    ${LI(`Balance due within ${d.balanceDays} days of final delivery`)}
+    ${LI(`Payment via ${d.paymentMethod}`)}
+    ${SP()}
+    ${H1('5. CANCELLATION & VARIATION')}
+    ${LI(`Cancellations with more than ${d.cancelNotice} days notice: full deposit refunded`)}
+    ${LI(`Cancellations with less than ${d.cancelNotice} days notice: deposit is ${d.cancelDeposit}`)}
+    ${LI('Material changes to scope must be agreed in writing and may attract additional fees')}
+    ${SP()}
+    ${cl?H1('6. TERMS & CONDITIONS')+cl+SP():''}
+    ${H1('7. GENERAL')}
+    ${LI('This Agreement is governed by the laws of Queensland, Australia')}
+    ${LI('Disputes will first be attempted to be resolved by negotiation in good faith')}
+    ${LI('This document constitutes the entire agreement and supersedes all prior discussions')}
+    ${LI('Amendments must be in writing and signed by both parties')}
+    ${SP()}
+    ${H1('8. SIGNATURES')}
+    ${P('By signing below, both parties agree to be bound by the terms of this Agreement.')}
+    ${docPara('',{before:160})}
+    ${sigTbl('FOR '+d.clientName.toUpperCase(), d.providerName.toUpperCase())}
+    ${SP()}
+    ${docPara(docRun('This Agreement was prepared as a general template. Both parties should seek independent legal advice before signing.',{size:18,color:'AAAAAA',font:'Arial',italic:true}),{center:true})}
+  `;
+
+  const numbering=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="&#x2022;"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+  const document=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body></w:document>`;
+  const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`;
+  const ct=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>`;
+  const rr=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const rw=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>`;
+
+  return buildZip([
+    {name:'[Content_Types].xml',data:strToU8(ct)},
+    {name:'_rels/.rels',data:strToU8(rr)},
+    {name:'word/_rels/document.xml.rels',data:strToU8(rw)},
+    {name:'word/document.xml',data:strToU8(document)},
+    {name:'word/styles.xml',data:strToU8(styles)},
+    {name:'word/numbering.xml',data:strToU8(numbering)},
+  ]);
+}
+
+function generateContract(){
+  const cfg=typeConfig[state.type];
+  const gv=id=>{const el=document.getElementById(id);return el?el.value.trim():'';};
+  const pn=gv('provider-name')||'Unwritten Films';
+  const ci={};
+  cfg.clientFields.forEach(f=>{ci[f.id]=gv(f.id)||'';});
+  const cn=ci['client-company']||ci['client-name']||((ci['client-name-1']||'')+(ci['client-name-2']?' & '+ci['client-name-2']:'')||'Client');
+  const cr=cfg.clientFields.map(f=>[f.label,ci[f.id]||'--']);
+
+  const d={
+    providerName:pn,providerABN:gv('provider-abn'),providerEmail:gv('provider-email'),providerPhone:gv('provider-phone'),
+    clientName:cn,clientRows:cr,projectName:gv('project-name'),projectType:cfg.label,
+    filmingDates:gv('filming-dates'),filmingLocation:gv('filming-location'),deliveryDate:gv('delivery-date'),
+    scopeDesc:gv('scope-description')||cfg.defaultScope,revisions:gv('revisions'),rawFootage:gv('raw-footage'),
+    depositPct:gv('deposit-pct'),balanceDays:gv('balance-days'),paymentMethod:gv('payment-method'),
+    cancelNotice:gv('cancel-notice'),cancelDeposit:gv('cancel-deposit'),
+    liabilityAmt:gv('liability-amount')||'$10,000,000',deletionDays:gv('deletion-days'),blueCard:gv('blue-card'),
+    feeRows:state.feeRows,clauses:state.clauses
+  };
+
+  const zip=makeDocx(d);
+  let bin='';
+  for(let i=0;i<zip.length;i++)bin+=String.fromCharCode(zip[i]);
+  const b64=btoa(bin);
+  const fn=`${pn.replace(/\s+/g,'_')}_${cfg.label}_${cn.replace(/\s+/g,'_')}.docx`;
+  const a=document.createElement('a');
+  a.href='data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,'+b64;
+  a.download=fn;a.style.display='none';
+  document.body.appendChild(a);a.click();
+  setTimeout(()=>a.remove(),500);
+}
+
 
 // ── BOOT ───────────────────────────────────────────────────────────────────
 selectType('corporate');
